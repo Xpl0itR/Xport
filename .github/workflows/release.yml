@@ -1,0 +1,27 @@
+name: Release
+
+on:
+  release:
+    types:
+      - published
+
+jobs:
+  release:
+    runs-on: 'ubuntu-latest'
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@v6
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Package
+        run:  dotnet pack --configuration Release /p:Version=${{ github.ref_name }} /p:ContinuousIntegrationBuild=true
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bin/Xport*/Release/*nupkg
+          fail_on_unmatched_files: true
