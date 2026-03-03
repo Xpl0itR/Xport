@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="README.md" />
+  </Folder>
+  <Project Path="src/Xport/Xport.csproj" />
+  <Project Path="src/Xport.Abstractions/Xport.Abstractions.csproj" />
+  <Project Path="src/Xport.AspNetCore.Adapters/Xport.AspNetCore.Adapters.csproj" />
+  <Project Path="example/XportExample.csproj" />
+</Solution>

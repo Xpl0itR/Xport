@@ -1,0 +1,12 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!--workaround for https://github.com/dotnet/sdk/issues/40487-->
+  <Target Name="_FilterIISAssets" Condition="'$(PublishIISAssets)' != 'true'" AfterTargets="ComputeResolvedFilesToPublishList" BeforeTargets="CopyFilesToPublishDirectory">
+    <ItemGroup>
+      <ResolvedFileToPublish Update="@(ResolvedFileToPublish)" Condition="'%(Filename)%(Extension)' == 'aspnetcorev2_inprocess.dll'">
+        <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+
+</Project>

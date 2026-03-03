@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <Import Project="..\src\Xport.AspNetCore.Adapters\Xport.AspNetCore.Adapters.targets" />
+
+  <PropertyGroup>
+    <BaseOutputPath>$(SolutionDir)bin/$(MSBuildProjectName)</BaseOutputPath>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IsPackable>false</IsPackable>
+    <LangVersion>Latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <OutputType>Exe</OutputType>
+    <PublishAot>true</PublishAot>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\src\Xport\Xport.csproj" />
+    <ProjectReference Include="..\src\Xport.AspNetCore.Adapters\Xport.AspNetCore.Adapters.csproj" />
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
