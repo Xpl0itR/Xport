@@ -13,27 +13,33 @@ using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Diagnostics;
 using Microsoft.AspNetCore.Connections;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.ObjectPool;
 
 namespace Xport;
 
-public sealed class TransportServer : IAsyncDisposable
+public sealed class TransportServer : IHostedService, IAsyncDisposable
 {
     private readonly ILogger _logger;
-    private readonly List<IConnectionListenerFactory> _transportFactories;
-    private readonly List<IMultiplexedConnectionListenerFactory> _multiplexedFactories;
+    private readonly ObjectPoolProvider _objectPoolProvider;
+    private readonly Dictionary<string, IConnectionListenerFactory> _singleplexedFactories;
+    private readonly Dictionary<string, IMultiplexedConnectionListenerFactory> _multiplexedFactories;
     private readonly List<TransportSocket> _transportSockets;
 
     public TransportServer(
         IServiceProvider applicationServices,
+        ObjectPoolProvider objectPoolProvider,
         ILogger<TransportServer> logger,
-        IEnumerable<IConnectionListenerFactory> transportFactories,
+        IEnumerable<IConnectionListenerFactory> singleplexedFactories,
         IEnumerable<IMultiplexedConnectionListenerFactory> multiplexedFactories)
     {
         _logger = logger;
-        _transportFactories = transportFactories.Reverse().ToList();
-        _multiplexedFactories = multiplexedFactories.Reverse().ToList();
-        if (_transportFactories.Count == 0 && _multiplexedFactories.Count == 0)
+        _objectPoolProvider    = objectPoolProvider;
+        _singleplexedFactories = singleplexedFactories.Reverse().ToDictionary(static factory => factory.GetType().FullName!);
+        _multiplexedFactories  = multiplexedFactories .Reverse().ToDictionary(static factory => factory.GetType().FullName!);
+
+        if (_singleplexedFactories.Count == 0 && _multiplexedFactories.Count == 0)
             ThrowHelper.ThrowInvalidOperationException("No transport factories were registered. Ensure that at least one transport is added to the service collection.");
 
         _transportSockets = [];
@@ -47,26 +53,60 @@ public sealed class TransportServer : IAsyncDisposable
         if (Options.TransportSocketOptions.Count == 0)
             ThrowHelper.ThrowInvalidOperationException("No transport socket options were registered. Ensure that at least one TransportSocketOptions instance is added to TransportServerOptions.");
 
-        foreach (TransportSocketOptions options in Options.TransportSocketOptions) // TODO: rewrite this so each endpoint can specify which transport protocol it wants to use instead of trying to guess based on the endpoint type
+        foreach (TransportSocketOptions options in Options.TransportSocketOptions)
         {
-            TransportSocket transportSocket;
-            if (TryGetMultiplexedTransportFactory(options.EndPoint, out IMultiplexedConnectionListenerFactory? listenerFactory))
+            IConnectionListenerFactory? singleplexedFactory;
+            IMultiplexedConnectionListenerFactory? multiplexedFactory;
+
+            if (options.TransportFactoryName is null)
             {
-                IMultiplexedConnectionListener listener = await listenerFactory.BindAsync(options.EndPoint, options.Features, ct).ConfigureAwait(false);
-                transportSocket = new TransportSocket(options, listener);
+                if (TryGetSingleplexedTransportFactory(options.EndPoint, out singleplexedFactory))
+                    goto singleplexed;
 
-                _logger.LogListeningOnEndpoint(listener.EndPoint);
-            }
-            else
-            {
-                IConnectionListener listener = await GetTransportFactory(options.EndPoint).BindAsync(options.EndPoint, ct).ConfigureAwait(false);
-                transportSocket = new TransportSocket(options, listener);
+                if (TryGetMultiplexedTransportFactory(options.EndPoint, out multiplexedFactory))
+                    goto multiplexed;
 
-                _logger.LogListeningOnEndpoint(listener.EndPoint);
+                ThrowHelper.ThrowInvalidOperationException(
+                    $"No transport factory registered for endpoint type {options.EndPoint.GetType().Name}.");
             }
 
-            _transportSockets.Add(transportSocket);
-            ThreadPool.UnsafeQueueUserWorkItem(transportSocket, preferLocal: false);
+            if (_singleplexedFactories.TryGetValue(options.TransportFactoryName, out singleplexedFactory))
+                goto singleplexed;
+
+            if (_multiplexedFactories.TryGetValue(options.TransportFactoryName, out multiplexedFactory))
+                goto multiplexed;
+
+            ThrowHelper.ThrowInvalidOperationException(
+                $"No transport factory registered with name {options.TransportFactoryName}.");
+
+        singleplexed:
+            IConnectionListener singleplexedListener = await singleplexedFactory.BindAsync(options.EndPoint, ct).ConfigureAwait(false);
+            TransportSocket<ConnectionContext> singleplexedSocket = new(
+                _objectPoolProvider,
+                options,
+                options.BuildHandler(),
+                singleplexedListener.AcceptAsync,
+                singleplexedListener.UnbindAsync,
+                singleplexedListener);
+
+            ThreadPool.UnsafeQueueUserWorkItem(singleplexedSocket, preferLocal: false);
+            _transportSockets.Add(singleplexedSocket);
+            _logger.LogListeningOnEndpoint(singleplexedListener.EndPoint, singleplexedListener.GetType().Name);
+            continue;
+
+        multiplexed:
+            IMultiplexedConnectionListener multiplexedListener = await multiplexedFactory.BindAsync(options.EndPoint, options.Features, ct).ConfigureAwait(false);
+            TransportSocket<MultiplexedConnectionContext> multiplexedSocket = new(
+                _objectPoolProvider,
+                options,
+                options.BuildMultiplexedHandler(),
+                token => multiplexedListener.AcceptAsync(null, token),
+                multiplexedListener.UnbindAsync,
+                multiplexedListener);
+
+            ThreadPool.UnsafeQueueUserWorkItem(multiplexedSocket, preferLocal: false);
+            _transportSockets.Add(multiplexedSocket);
+            _logger.LogListeningOnEndpoint(multiplexedListener.EndPoint, multiplexedListener.GetType().Name);
         }
     }
 
@@ -75,26 +115,19 @@ public sealed class TransportServer : IAsyncDisposable
         Task[] tasks = new Task[_transportSockets.Count];
 
         for (int i = 0; i < tasks.Length; i++)
-            tasks[i] = _transportSockets[i].UnbindAsync(ct);
-
-        await Task.WhenAll(tasks).ConfigureAwait(false);
-
-        for (int i = 0; i < tasks.Length; i++)
-            tasks[i] = _transportSockets[i].CloseAllConnectionsAsync(ct);
-
-        await Task.WhenAll(tasks).ConfigureAwait(false);
-
-        for (int i = 0; i < tasks.Length; i++)
-            tasks[i] = _transportSockets[i].DisposeAsync().AsTask();
+            tasks[i] = _transportSockets[i].ShutdownAsync(ct);
 
         await Task.WhenAll(tasks).ConfigureAwait(false);
 
         _transportSockets.Clear();
     }
 
-    private bool TryGetMultiplexedTransportFactory(EndPoint endpoint, [NotNullWhen(true)] out IMultiplexedConnectionListenerFactory? listenerFactory)
+    public ValueTask DisposeAsync() =>
+        new(StopAsync(new CancellationToken(canceled: true)));
+
+    private bool TryGetSingleplexedTransportFactory(EndPoint endpoint, [NotNullWhen(true)] out IConnectionListenerFactory? listenerFactory)
     {
-        foreach (IMultiplexedConnectionListenerFactory factory in _multiplexedFactories)
+        foreach (IConnectionListenerFactory factory in _singleplexedFactories.Values)
         {
             if (CanBind(factory as IConnectionListenerFactorySelector, endpoint))
             {
@@ -107,23 +140,21 @@ public sealed class TransportServer : IAsyncDisposable
         return false;
     }
 
-    private IConnectionListenerFactory GetTransportFactory(EndPoint endpoint)
+    private bool TryGetMultiplexedTransportFactory(EndPoint endpoint, [NotNullWhen(true)] out IMultiplexedConnectionListenerFactory? listenerFactory)
     {
-        foreach (IConnectionListenerFactory factory in _transportFactories)
+        foreach (IMultiplexedConnectionListenerFactory factory in _multiplexedFactories.Values)
         {
             if (CanBind(factory as IConnectionListenerFactorySelector, endpoint))
             {
-                return factory;
+                listenerFactory = factory;
+                return true;
             }
         }
 
-        return ThrowHelper.ThrowInvalidOperationException<IConnectionListenerFactory>(
-            $"No transport factory registered for endpoint type {endpoint.GetType().Name}.");
+        listenerFactory = null;
+        return false;
     }
 
     private static bool CanBind(IConnectionListenerFactorySelector? selector, EndPoint endpoint) =>
-        selector?.CanBind(endpoint) ?? true; // Backwards compatibility for pre-net8
-
-    public ValueTask DisposeAsync() =>
-        new(StopAsync(new CancellationToken(canceled: true)));
+        selector?.CanBind(endpoint) ?? true; // Backwards compatibility for pre IConnectionListenerFactorySelector (net8)
 }

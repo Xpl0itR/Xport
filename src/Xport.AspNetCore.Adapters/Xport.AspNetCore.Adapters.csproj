@@ -4,7 +4,7 @@
     <Authors>Xpl0itR</Authors>
     <BaseOutputPath>$(SolutionDir)bin/$(MSBuildProjectName)</BaseOutputPath>
     <Copyright>Copyright © 2026 Xpl0itR</Copyright>
-    <Description>aspnet adapters</Description>
+    <Description>ASP.NET Core transport adapters for Kestrel socket, QUIC, and Named Pipe implementations.</Description>
     <IncludeSymbols>true</IncludeSymbols>
     <IsAotCompatible>true</IsAotCompatible>
     <IsPackable>true</IsPackable>
@@ -14,17 +14,15 @@
     <PackageLicenseExpression>MPL-2.0</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <TargetFrameworks>net6.0;net7.0;net8.0;net9.0;net10.0</TargetFrameworks>
   </PropertyGroup>
 
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" IsImplicitlyDefined="false" />
-    <ProjectReference Include="..\Xport.Abstractions\Xport.Abstractions.csproj" />
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.103">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
+    <ProjectReference Include="..\Xport\Xport.csproj" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.203" PrivateAssets="all" />
     <Content Include=".\Xport.AspNetCore.Adapters.targets" Pack="true" PackagePath="build/" />
   </ItemGroup>
 

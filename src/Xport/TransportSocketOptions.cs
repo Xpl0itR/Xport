@@ -7,52 +7,67 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
-using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Xport.Abstractions;
+using Xport.Middleware.ConnectionLimiter;
 
 namespace Xport;
 
 public sealed class TransportSocketOptions(EndPoint endPoint, IServiceProvider applicationServices) : IConnectionBuilder, IMultiplexedConnectionBuilder
 {
-    private readonly IList<Func<Func<ConnectionContext, Task>, Func<ConnectionContext, Task>>> _middleware = [];
+    private readonly IList<Func<Func<ConnectionContext, Task>, Func<ConnectionContext, Task>>> _singleplexedMiddleware = [];
     private readonly IList<Func<Func<MultiplexedConnectionContext, Task>, Func<MultiplexedConnectionContext, Task>>> _multiplexedMiddleware = [];
 
-    public EndPoint EndPoint =>
-        endPoint;
+    internal string? TransportFactoryName;
+
+    public EndPoint EndPoint { get; internal set; } = endPoint;
 
     public IServiceProvider ApplicationServices =>
         applicationServices;
 
     public FeatureCollection? Features { get; set; }
 
-    public Func<ConnectionContext, Task> BuildHandler()
+    public bool InjectScopedServiceProvider { get; set; } = true;
+
+    public int SlotMapInitialCapacity { get; set; } = 256;
+
+    public TransportSocketOptions UseTransport<TFactory>() where TFactory : IConnectionListenerFactory
     {
-        Func<ConnectionContext, Task> handler = static _ => Task.CompletedTask;
-
-        foreach (Func<Func<ConnectionContext, Task>, Func<ConnectionContext, Task>> next in _middleware.Reverse())
-            handler = next(handler);
-
-        return handler;
+        TransportFactoryName = typeof(TFactory).FullName;
+        return this;
     }
 
-    public Func<MultiplexedConnectionContext, Task> BuildMultiplexedHandler()
+    public TransportSocketOptions UseMultiplexedTransport<TFactory>() where TFactory : IMultiplexedConnectionListenerFactory
     {
-        Func<MultiplexedConnectionContext, Task> handler = static _ => Task.CompletedTask;
+        TransportFactoryName = typeof(TFactory).FullName;
+        return this;
+    }
 
-        foreach (Func<Func<MultiplexedConnectionContext, Task>, Func<MultiplexedConnectionContext, Task>> next in _multiplexedMiddleware.Reverse())
-            handler = next(handler);
+    public TransportSocketOptions UseSocketTransport()
+    {
+        TransportFactoryName = "Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.SocketTransportFactory";
+        return this;
+    }
 
-        return handler;
+    public TransportSocketOptions UseNamedPipeTransport()
+    {
+        TransportFactoryName = "Microsoft.AspNetCore.Server.Kestrel.Transport.NamedPipes.Internal.NamedPipeTransportFactory";
+        return this;
+    }
+
+    public TransportSocketOptions UseQuicTransport()
+    {
+        TransportFactoryName = "Microsoft.AspNetCore.Server.Kestrel.Transport.Quic.QuicTransportFactory";
+        return this;
     }
 
     public TransportSocketOptions Use(Func<Func<ConnectionContext, Task>, Func<ConnectionContext, Task>> middleware)
     {
-        _middleware.Add(middleware);
+        _singleplexedMiddleware.Add(middleware);
         return this;
     }
 
@@ -68,38 +83,25 @@ public sealed class TransportSocketOptions(EndPoint endPoint, IServiceProvider a
     public TransportSocketOptions Use(Func<MultiplexedConnectionContext, Func<MultiplexedConnectionContext, Task>, Task> middleware) =>
         Use(next => context => middleware(context, next));
 
-    public TransportSocketOptions UseMiddleware<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TTransportMiddleware>(bool optional = false)
+    public TransportSocketOptions UseMiddleware<TTransportMiddleware>() where TTransportMiddleware : ITransportMiddleware<ConnectionContext> =>
+        UseMiddleware(
+            ApplicationServices.GetRequiredService<TTransportMiddleware>());
+
+    public TransportSocketOptions UseMiddleware<TTransportMiddleware>(TTransportMiddleware middleware)
         where TTransportMiddleware : ITransportMiddleware<ConnectionContext>
     {
-        TTransportMiddleware? middleware = ApplicationServices.GetService<TTransportMiddleware>();
-        if (middleware is null)
-        {
-            if (optional) return this;
-            middleware = ActivatorUtilities.CreateInstance<TTransportMiddleware>(ApplicationServices);
-        }
-
         if (middleware is ITransportMiddleware<MultiplexedConnectionContext> multiplexedMiddleware)
             Use(next => context => multiplexedMiddleware.InvokeAsync(context, next));
 
-        Use(next => context => middleware.InvokeAsync(context, next));
-
-        return this;
+        return Use(next => context => middleware.InvokeAsync(context, next));
     }
 
-    public TransportSocketOptions UseMultiplexedMiddleware<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TTransportMiddleware>(bool optional = false)
-        where TTransportMiddleware : ITransportMiddleware<MultiplexedConnectionContext>
-    {
-        TTransportMiddleware? middleware = ApplicationServices.GetService<TTransportMiddleware>();
-        if (middleware is null)
-        {
-            if (optional) return this;
-            middleware = ActivatorUtilities.CreateInstance<TTransportMiddleware>(ApplicationServices);
-        }
+    public TransportSocketOptions UseMultiplexedMiddleware<TTransportMiddleware>() where TTransportMiddleware : ITransportMiddleware<MultiplexedConnectionContext> =>
+        UseMultiplexedMiddleware(
+            ApplicationServices.GetRequiredService<TTransportMiddleware>());
 
+    public TransportSocketOptions UseMultiplexedMiddleware<TTransportMiddleware>(TTransportMiddleware middleware) where TTransportMiddleware : ITransportMiddleware<MultiplexedConnectionContext> =>
         Use(next => context => middleware.InvokeAsync(context, next));
-
-        return this;
-    }
 
     public TransportSocketOptions Run(Func<ConnectionContext, Task> handler) =>
         Use(_ => handler);
@@ -130,6 +132,29 @@ public sealed class TransportSocketOptions(EndPoint endPoint, IServiceProvider a
         return this;
     }
 
+    public TransportSocketOptions UseConnectionLimiterMiddleware() =>
+        UseMiddleware<ConnectionLimiterMiddleware>();
+
+    public Func<ConnectionContext, Task> BuildHandler()
+    {
+        Func<ConnectionContext, Task> handler = static _ => Task.CompletedTask;
+
+        for (int i = _singleplexedMiddleware.Count - 1; i >= 0; i--)
+            handler = _singleplexedMiddleware[i](handler);
+
+        return handler;
+    }
+
+    public Func<MultiplexedConnectionContext, Task> BuildMultiplexedHandler()
+    {
+        Func<MultiplexedConnectionContext, Task> handler = static _ => Task.CompletedTask;
+
+        for (int i = _multiplexedMiddleware.Count - 1; i >= 0; i--)
+            handler = _multiplexedMiddleware[i](handler);
+
+        return handler;
+    }
+
     #region Compatibility
     private static TDelegate UnsafeAs<TDelegate>(Delegate @delegate) where TDelegate : Delegate =>
         (TDelegate)Delegate.CreateDelegate(typeof(TDelegate), @delegate.Target, @delegate.Method);
@@ -142,7 +167,7 @@ public sealed class TransportSocketOptions(EndPoint endPoint, IServiceProvider a
 
     IConnectionBuilder IConnectionBuilder.Use(Func<ConnectionDelegate, ConnectionDelegate> middleware)
     {
-        _middleware.Add(
+        _singleplexedMiddleware.Add(
             UnsafeAs<Func<Func<ConnectionContext, Task>, Func<ConnectionContext, Task>>>(middleware));
 
         return this;

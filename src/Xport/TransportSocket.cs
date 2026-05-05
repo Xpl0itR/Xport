@@ -5,103 +5,59 @@
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.ObjectPool;
 
 namespace Xport;
 
-internal sealed class TransportSocket : IThreadPoolWorkItem, IAsyncDisposable
+internal sealed class TransportSocket<TConnection> : TransportSocket, IThreadPoolWorkItem
+    where TConnection : BaseConnectionContext
 {
-    private readonly IServiceProvider _serviceProvider;
+    internal readonly TransportSocketOptions Options;
+    internal readonly Func<TConnection, Task> ConnectionHandler;
+    internal readonly ObjectPool<TransportConnection<TConnection>> ConnObjPool;
+
+    private readonly Func<CancellationToken, ValueTask<TConnection?>> _acceptAsync;
     private readonly ILogger _logger;
 
-    private readonly IConnectionListener? _listener;
-    private readonly Func<ConnectionContext, Task>? _connectionHandler;
-
-    private readonly IMultiplexedConnectionListener? _multiplexedListener;
-    private readonly Func<MultiplexedConnectionContext, Task>? _multiplexedConnectionHandler;
-
-    private ConcurrentDictionary<string, WeakReference<TransportConnection>>? _connections;
-    private TaskCompletionSource? _tcs;
-
-    internal TransportSocket(TransportSocketOptions options, IConnectionListener listener)
+    internal TransportSocket(
+        ObjectPoolProvider objectPoolProvider,
+        TransportSocketOptions options,
+        Func<TConnection, Task> connectionHandler,
+        Func<CancellationToken, ValueTask<TConnection?>> acceptAsync,
+        Func<CancellationToken, ValueTask> unbindAsync,
+        IAsyncDisposable listener)
+            : base(unbindAsync, listener, options.SlotMapInitialCapacity)
     {
-        _serviceProvider = options.ApplicationServices;
-        _logger = _serviceProvider.GetRequiredService<ILogger<TransportSocket>>();
-        _listener = listener;
-        _connectionHandler = options.BuildHandler();
+        Options = options;
+        ConnectionHandler = connectionHandler;
+        ConnObjPool = objectPoolProvider.Create(new PoolingPolicy(this));
+        _acceptAsync = acceptAsync;
+        _logger = options.ApplicationServices.GetRequiredService<ILogger<TransportSocket>>();
     }
-
-    internal TransportSocket(TransportSocketOptions options, IMultiplexedConnectionListener listener)
-    {
-        _serviceProvider = options.ApplicationServices;
-        _logger = _serviceProvider.GetRequiredService<ILogger<TransportSocket>>();
-        _multiplexedListener = listener;
-        _multiplexedConnectionHandler = options.BuildMultiplexedHandler();
-    }
-
-    internal async Task UnbindAsync(CancellationToken ct)
-    {
-        await (_listener?.UnbindAsync(ct) 
-            ?? _multiplexedListener!.UnbindAsync(ct));
-
-        if (_tcs is not null)
-            await _tcs.Task.ConfigureAwait(false);
-    }
-
-    internal Task CloseAllConnectionsAsync(CancellationToken ct)
-    {
-        if (_connections is null)
-            return Task.CompletedTask;
-
-        List<Task> closeTasks = new(_connections.Count);
-        foreach (WeakReference<TransportConnection> reference in _connections.Values)
-            if (reference.TryGetTarget(out TransportConnection? connection))
-                closeTasks.Add(
-                    connection.CloseAsync(ct));
-
-        _connections.Clear();
-
-        return Task.WhenAll(closeTasks);
-    }
-
-    public ValueTask DisposeAsync() =>
-        _listener?.DisposeAsync()
-     ?? _multiplexedListener!.DisposeAsync();
 
     async void IThreadPoolWorkItem.Execute()
     {
         try
         {
-            _connections = [];
-            _tcs = new TaskCompletionSource();
-
-            if (_multiplexedListener is not null)
+            while (true)
             {
-                while (true)
-                {
-                    MultiplexedConnectionContext? connection = await _multiplexedListener.AcceptAsync().ConfigureAwait(false);
-                    if (connection is null)
-                        break;
+                TConnection? connection = await _acceptAsync(CancellationToken.None).ConfigureAwait(false);
+                if (connection is null)
+                    break;
 
-                    HandleConnection(connection, _multiplexedConnectionHandler!);
-                }
-            }
-            else
-            {
-                while (true)
-                {
-                    ConnectionContext? connection = await _listener!.AcceptAsync().ConfigureAwait(false);
-                    if (connection is null)
-                        break;
+                _logger.LogConnectionAccepted(connection.ConnectionId);
 
-                    HandleConnection(connection, _connectionHandler!);
-                }
+                TransportConnection<TConnection> transportConnection = ConnObjPool.Get();
+                int slot = ConnectionSlots.Insert(transportConnection);
+
+                transportConnection.Initialize(connection, slot);
+                ThreadPool.UnsafeQueueUserWorkItem(transportConnection, preferLocal: false);
             }
         }
         catch (Exception ex)
@@ -110,26 +66,47 @@ internal sealed class TransportSocket : IThreadPoolWorkItem, IAsyncDisposable
         }
         finally
         {
-            _tcs?.TrySetResult();
+            Tcs.TrySetResult();
         }
     }
 
-    private void HandleConnection<TConnection>(
-        TConnection connection, Func<TConnection, Task> connectionHandler)
-            where TConnection : BaseConnectionContext
+    private sealed class PoolingPolicy(TransportSocket<TConnection> socket)
+        : IPooledObjectPolicy<TransportConnection<TConnection>>
     {
-        _logger.LogConnectionAccepted(connection.ConnectionId);
+        private readonly ILogger _connectionLogger =
+            socket.Options.ApplicationServices.GetRequiredService<ILogger<TransportConnection>>();
 
-        TransportConnection<TConnection> transportConnection = new(
-            _serviceProvider, connection, connectionHandler, UnregisterConnection);
+        public TransportConnection<TConnection> Create() =>
+            new(socket, _connectionLogger);
 
-        _connections!.TryAdd(
-            connection.ConnectionId,
-            new WeakReference<TransportConnection>(transportConnection));
-
-        ThreadPool.UnsafeQueueUserWorkItem(transportConnection, preferLocal: false);
+        public bool Return(TransportConnection<TConnection> obj) =>
+            true;
     }
+}
 
-    private void UnregisterConnection(string id) =>
-        _connections!.TryRemove(id, out _);
+internal abstract class TransportSocket(
+    Func<CancellationToken, ValueTask> unbindAsync, IAsyncDisposable listener, int slotMapInitialCapacity)
+{
+    internal readonly SlotMap<TransportConnection> ConnectionSlots = new(slotMapInitialCapacity);
+
+    protected readonly TaskCompletionSource Tcs = new();
+
+    internal async Task ShutdownAsync(CancellationToken ct)
+    {
+        await unbindAsync(ct).ConfigureAwait(false);
+        await Tcs.Task.ConfigureAwait(false);
+
+        List<Task> closeTasks = [];
+        foreach (TransportConnection connection in ConnectionSlots)
+            closeTasks.Add(
+                connection.CloseAsync(ct));
+
+        if (closeTasks.Count > 0)
+        {
+            ConnectionSlots.Clear();
+            await Task.WhenAll(closeTasks).ConfigureAwait(false);
+        }
+
+        await listener.DisposeAsync().ConfigureAwait(false);
+    }
 }

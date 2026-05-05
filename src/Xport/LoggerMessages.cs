@@ -15,8 +15,11 @@ internal static partial class LoggerMessages
     [LoggerMessage(LogLevel.Error, "An unhandled exception has occurred in an async void method.", EventName = "UnhandledExceptionAsyncVoid")]
     internal static partial void LogUnhandledExceptionAsyncVoid(this ILogger logger, Exception exception);
 
-    [LoggerMessage(LogLevel.Information, "Listening on: {endpoint}", EventName = "ListeningOnEndpoint")]
-    internal static partial void LogListeningOnEndpoint(this ILogger logger, EndPoint endpoint);
+    [LoggerMessage(LogLevel.Warning, """Connection id "{connectionId}" rejected: rate limit exceeded.""", EventName = "ConnectionRejectedRateLimit")]
+    public static partial void LogConnectionRejectedRateLimit(this ILogger logger, string connectionId);
+
+    [LoggerMessage(LogLevel.Information, "Listening on: {endpoint} using {transportName}.", EventName = "ListeningOnEndpoint")]
+    internal static partial void LogListeningOnEndpoint(this ILogger logger, EndPoint endpoint, string transportName);
 
     [LoggerMessage(LogLevel.Debug, """Connection id "{connectionId}" accepted.""", EventName = "ConnectionAccepted")]
     internal static partial void LogConnectionAccepted(this ILogger logger, string connectionId);

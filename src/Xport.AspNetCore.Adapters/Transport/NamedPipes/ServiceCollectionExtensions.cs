@@ -8,6 +8,7 @@
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.Versioning;
+using CommunityToolkit.Diagnostics;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.NamedPipes;
 using Microsoft.Extensions.DependencyInjection;
@@ -27,6 +28,9 @@ public static class ServiceCollectionExtensions
     [SupportedOSPlatform("windows")]
     public static IServiceCollection AddNamedPipeTransport(this IServiceCollection services)
     {
+        if (!OperatingSystem.IsWindows())
+            ThrowHelper.ThrowPlatformNotSupportedException("Named pipes transport requires a Windows operating system.");
+
         services.TryAddSingleton<ObjectPoolProvider, DefaultObjectPoolProvider>();
         services.AddOptions<NamedPipeTransportOptions>()
                 .Configure(static (NamedPipeTransportOptions options, IServiceProvider services) =>

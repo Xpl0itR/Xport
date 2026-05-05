@@ -21,8 +21,11 @@ public sealed class TransportServerOptions(IServiceProvider applicationServices)
 {
     private readonly List<TransportSocketOptions> _transportSocketOptions = [];
 
-    [NotNull] private TransportServerConfig? Config =>
+    [field: MaybeNull] private TransportServerConfig Config =>
         field ??= applicationServices.GetRequiredService<IOptions<TransportServerConfig>>().Value;
+
+    public IServiceProvider ApplicationServices =>
+        applicationServices;
 
     public IReadOnlyList<TransportSocketOptions> TransportSocketOptions =>
         _transportSocketOptions;
@@ -30,10 +33,10 @@ public sealed class TransportServerOptions(IServiceProvider applicationServices)
     public TransportServerOptions ListenIp(ReadOnlySpan<char> host, Action<TransportSocketOptions> configure) =>
         Listen(IPEndPoint.Parse(host), configure);
 
-    public TransportServerOptions ListenIp(ReadOnlySpan<char> ip, int port, Action<TransportSocketOptions> configure) =>
+    public TransportServerOptions ListenIp(ReadOnlySpan<char> ip, ushort port, Action<TransportSocketOptions> configure) =>
         ListenIp(IPAddress.Parse(ip), port, configure);
 
-    public TransportServerOptions ListenIp(IPAddress ip, int port, Action<TransportSocketOptions> configure) =>
+    public TransportServerOptions ListenIp(IPAddress ip, ushort port, Action<TransportSocketOptions> configure) =>
         Listen(new IPEndPoint(ip, port), configure);
 
     public TransportServerOptions ListenHandle(ulong handle, Action<TransportSocketOptions> configure) =>
@@ -69,37 +72,52 @@ public sealed class TransportServerOptions(IServiceProvider applicationServices)
             return ThrowHelper.ThrowArgumentException<TransportServerOptions>(
                 nameof(name), $"""An endpoint named "{name}" was not found in the config.""");
 
-        EndPoint endpoint = EndPointFromConnectionString(connectionString);
-        Listen(endpoint, configure);
-
-        return this;
-    }
-
-    private static EndPoint EndPointFromConnectionString(ReadOnlySpan<char> connectionString)
-    {
         const string unixSocketPrefix = "unix:/";
         const string namedPipePrefix = "pipe:/";
+        const string tcpPrefix = "tcp:/";
+        const string quicPrefix = "quic:/";
 
-        if (connectionString.StartsWith(unixSocketPrefix, StringComparison.OrdinalIgnoreCase))
+        TransportSocketOptions options = new(null!, applicationServices);
+
+        if (connectionString.StartsWith(namedPipePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            options.EndPoint = new NamedPipeEndPoint(connectionString[namedPipePrefix.Length..]);
+            options.UseNamedPipeTransport();
+        }
+        else if (connectionString.StartsWith(unixSocketPrefix, StringComparison.OrdinalIgnoreCase))
         {
             int lenPrefix = unixSocketPrefix.Length;
             if (!OperatingSystem.IsWindows())
                 lenPrefix--;
 
-            ReadOnlySpan<char> path = connectionString[lenPrefix..];
+            string path = connectionString[lenPrefix..];
 
             if (!Path.IsPathRooted(path))
                 ThrowHelper.ThrowArgumentException(nameof(connectionString), "Unix socket path must be absolute.");
 
-            return new UnixDomainSocketEndPoint(path.ToString());
+            options.EndPoint = new UnixDomainSocketEndPoint(path);
+            options.UseSocketTransport();
         }
-
-        if (connectionString.StartsWith(namedPipePrefix, StringComparison.OrdinalIgnoreCase))
+        else
         {
-            return new NamedPipeEndPoint(
-                connectionString[namedPipePrefix.Length..].ToString());
+            ReadOnlySpan<char> hostString = connectionString.AsSpan();
+            if (hostString.StartsWith(tcpPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                hostString = hostString[tcpPrefix.Length..];
+                options.UseSocketTransport();
+            }
+            else if (hostString.StartsWith(quicPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                hostString = hostString[quicPrefix.Length..];
+                options.UseQuicTransport();
+            }
+
+            options.EndPoint = IPEndPoint.Parse(hostString);
         }
 
-        return IPEndPoint.Parse(connectionString);
+        configure(options);
+        _transportSocketOptions.Add(options);
+
+        return this;
     }
 }

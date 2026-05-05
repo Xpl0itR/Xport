@@ -14,10 +14,10 @@ namespace Xport.AspNetCore.Adapters.Transport.Sockets;
 
 public static class ServiceCollectionExtensions
 {
-    public static IServiceCollection AddSocketsTransport(this IServiceCollection services, Action<SocketTransportOptions> options) =>
-        services.AddSocketsTransport().Configure(options);
+    public static IServiceCollection AddSocketTransport(this IServiceCollection services, Action<SocketTransportOptions> options) =>
+        services.AddSocketTransport().Configure(options);
 
-    public static IServiceCollection AddSocketsTransport(this IServiceCollection services)
+    public static IServiceCollection AddSocketTransport(this IServiceCollection services)
     {
 #if NET10_0_OR_GREATER
         services.AddOptions<SocketTransportOptions>()

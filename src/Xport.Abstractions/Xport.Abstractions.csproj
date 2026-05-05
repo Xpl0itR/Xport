@@ -4,9 +4,8 @@
     <Authors>Xpl0itR</Authors>
     <BaseOutputPath>$(SolutionDir)bin/$(MSBuildProjectName)</BaseOutputPath>
     <Copyright>Copyright © 2026 Xpl0itR</Copyright>
-    <Description>abstractions</Description>
+    <Description>Core abstractions and interfaces for Xport.</Description>
     <IncludeSymbols>true</IncludeSymbols>
-    <IsAotCompatible>true</IsAotCompatible>
     <IsPackable>true</IsPackable>
     <LangVersion>10</LangVersion>
     <Nullable>enable</Nullable>
@@ -20,10 +19,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.Connections.Abstractions" Version="8.0.23" />
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.103">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.203" PrivateAssets="all" />
   </ItemGroup>
 
 </Project>

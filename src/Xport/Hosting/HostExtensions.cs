@@ -19,4 +19,12 @@ public static class HostExtensions
 
         return host;
     }
+
+    public static IHost ConfigureTransportServer(this IHost host, Action<IServiceProvider, TransportServerOptions> configure)
+    {
+        TransportServer server = host.Services.GetRequiredService<TransportServer>();
+        configure(host.Services, server.Options);
+
+        return host;
+    }
 }
